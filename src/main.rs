@@ -451,6 +451,8 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
         let mut sale = None;
         let mut buy_d = None;
         let mut sale_d = None;
+        let mut date_cols: Vec<usize> = Vec::new();
+
         for (i, raw) in parts.iter().enumerate() {
             let h = sanitize_header(raw);
             match h.as_str() {
@@ -459,10 +461,24 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
                 "costshare" | "costpershare" => cost = Some(i),
                 "priceshare" | "pricepershare" | "saleprice" | "sellprice" => sale = Some(i),
                 "dateadded" | "purchasedate" | "buydate" => buy_d = Some(i),
-                "date" | "saledate" | "selldate" => sale_d = Some(i),
+                "date" | "saledate" | "selldate" => date_cols.push(i),
                 _ => {}
             }
         }
+
+        if buy_d.is_none() {
+            if let Some(first_date) = date_cols.get(0) {
+                buy_d = Some(*first_date);
+            }
+        }
+        if sale_d.is_none() {
+            if let Some(second_date) = date_cols.get(1) {
+                sale_d = Some(*second_date);
+            } else if let Some(first_date) = date_cols.get(0) {
+                sale_d = Some(*first_date);
+            }
+        }
+
         match (t, cost, qty, sale, buy_d, sale_d) {
             (Some(t), Some(c), Some(q), Some(s), Some(bd), Some(sd)) => Some(HeaderIdx {
                 ticker: t,
@@ -485,6 +501,7 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
     let mut header_idx: Option<HeaderIdx> = None;
     let mut positions = Vec::new();
     let mut in_details_section = false;
+    let mut current_ticker: Option<String> = None;
 
     for (idx, result) in rdr.records().enumerate() {
         let line_no = idx + 1;
@@ -506,8 +523,18 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
             continue;
         }
 
-        if joined_lower.contains("total") || joined_lower.contains("subtotal") {
-            continue;
+        // Skip summary/total lines but keep headers that include the word "Total"
+        if fields.len() == 1 {
+            let first = fields[0].trim().to_ascii_lowercase();
+            if first.contains("total") || first.contains("subtotal") {
+                continue;
+            }
+        }
+        if let Some(first) = fields.get(0) {
+            let first_lower = first.trim().to_ascii_lowercase();
+            if first_lower == "total" || first_lower == "subtotal" {
+                continue;
+            }
         }
 
         if header_idx.is_none() {
@@ -539,6 +566,17 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
         };
 
         if let Some(h) = header_idx {
+            let raw_ticker = get(h.ticker).trim();
+            // Update current ticker when we see a non-sell summary row, even if numbers are missing.
+            if !raw_ticker.is_empty()
+                && raw_ticker != "--"
+                && !raw_ticker.to_ascii_lowercase().starts_with("sell")
+            {
+                let parsed =
+                    parse_ticker(raw_ticker).map_err(|e| format!("Line {line_no}: {e}"))?;
+                current_ticker = Some(parsed);
+            }
+
             let required_missing = |i: usize| {
                 let v = get(i).trim();
                 v.is_empty() || v == "--"
@@ -552,7 +590,11 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
                 continue;
             }
 
-            let ticker = parse_ticker(get(h.ticker)).map_err(|e| format!("Line {line_no}: {e}"))?;
+            let ticker = if let Some(t) = &current_ticker {
+                t.clone()
+            } else {
+                continue; // no context yet
+            };
             let cost =
                 parse_f64(get(h.cost), "cost/share").map_err(|e| format!("Line {line_no}: {e}"))?;
             let qty =
@@ -588,6 +630,17 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
             continue;
         }
 
+        let raw_ticker = get(0).trim();
+        // Update current ticker from summary rows, skip adding a position for them
+        if !raw_ticker.is_empty()
+            && raw_ticker != "--"
+            && !raw_ticker.to_ascii_lowercase().starts_with("sell")
+        {
+            let parsed = parse_ticker(raw_ticker).map_err(|e| format!("Line {line_no}: {e}"))?;
+            current_ticker = Some(parsed);
+            continue;
+        }
+
         let required_missing = |s: &str| {
             let t = s.trim();
             t.is_empty() || t == "--"
@@ -601,7 +654,11 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
             continue;
         }
 
-        let ticker = parse_ticker(get(0)).map_err(|e| format!("Line {line_no}: {e}"))?;
+        let ticker = if let Some(t) = &current_ticker {
+            t.clone()
+        } else {
+            continue;
+        };
         let cost = parse_f64(get(1), "cost/share").map_err(|e| format!("Line {line_no}: {e}"))?;
         let qty = parse_f64(get(2), "quantity").map_err(|e| format!("Line {line_no}: {e}"))?;
         let sale_price =
@@ -832,7 +889,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec![
-        "Pos", "Ticker", "Cost", "Qty", "Sale", "ROI%", "Ann%", "Days", "Bought", "Sold",
+        "Pos", "Ticker", "Cost", "Qty", "Sale", "PnL$", "ROI%", "Days", "Bought", "Sold",
     ])
     .style(Style::default().fg(Color::Yellow));
 
@@ -841,16 +898,23 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(idx, p)| {
+            let pnl = Cell::from(Span::styled(
+                format_currency(p.roi_value()),
+                Style::default().fg(if p.roi_value() >= 0.0 {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ));
             let roi = Cell::from(styled_roi_pct(p.roi_pct()));
-            let ann = Cell::from(styled_roi_pct(p.annualized_roi()));
             Row::new(vec![
                 Cell::from(format!("#{idx}")),
                 Cell::from(p.ticker.as_str()),
                 Cell::from(format_currency(p.cost_per_share)),
                 Cell::from(format!("{:.2}", p.quantity)),
                 Cell::from(format_currency(p.sale_price)),
+                pnl,
                 roi,
-                ann,
                 Cell::from(p.days_held().to_string()),
                 Cell::from(p.purchase_date.format(DATE_FMT).to_string()),
                 Cell::from(p.sale_date.format(DATE_FMT).to_string()),
@@ -865,7 +929,7 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(8),
         Constraint::Length(10),
         Constraint::Length(8),
-        Constraint::Length(8),
+        Constraint::Length(10),
         Constraint::Length(6),
         Constraint::Length(12),
         Constraint::Length(12),
