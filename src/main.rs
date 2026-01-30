@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs,
     io::{self, stdout},
+    path::Path,
     time::Duration,
 };
 
@@ -24,8 +25,10 @@ use ratatui::{
         Table, TableState,
     },
 };
+use serde::{Deserialize, Serialize};
 
 const DATE_FMT: &str = "%Y-%m-%d";
+const DATA_FILE: &str = "positions.json";
 
 fn main() -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
@@ -176,6 +179,7 @@ fn run_app(
                                         app.positions.push(pos);
                                         app.selected = app.positions.len().saturating_sub(1);
                                     }
+                                    save_positions(&app.positions);
                                     app.mode = Mode::Portfolio;
                                     app.editing = None;
                                     app.form.error = None;
@@ -207,7 +211,7 @@ fn run_app(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Position {
     ticker: String,
     cost_per_share: f64,
@@ -691,6 +695,54 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
     Ok(positions)
 }
 
+fn load_positions() -> Result<Vec<Position>, String> {
+    let path = Path::new(DATA_FILE);
+    if !path.exists() {
+        return Err("no data file".into());
+    }
+    let data = fs::read_to_string(path).map_err(|e| format!("Failed to read data file: {e}"))?;
+    serde_json::from_str(&data).map_err(|e| format!("Failed to parse data file: {e}"))
+}
+
+fn save_positions(positions: &[Position]) {
+    let path = Path::new(DATA_FILE);
+    if let Ok(json) = serde_json::to_string_pretty(positions) {
+        if let Err(err) = fs::write(path, json) {
+            eprintln!("Could not save positions: {err}");
+        }
+    }
+}
+
+fn seed_positions() -> Vec<Position> {
+    let today = chrono::Utc::now().date_naive();
+    vec![
+        Position {
+            ticker: "AAPL".into(),
+            cost_per_share: 110.0,
+            quantity: 40.0,
+            sale_price: 127.5,
+            purchase_date: today - chrono::Days::new(12),
+            sale_date: today,
+        },
+        Position {
+            ticker: "AMD".into(),
+            cost_per_share: 64.0,
+            quantity: 100.0,
+            sale_price: 59.4,
+            purchase_date: today - chrono::Days::new(4),
+            sale_date: today,
+        },
+        Position {
+            ticker: "MSFT".into(),
+            cost_per_share: 320.5,
+            quantity: 10.0,
+            sale_price: 355.2,
+            purchase_date: today - chrono::Days::new(25),
+            sale_date: today - chrono::Days::new(5),
+        },
+    ]
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Portfolio,
@@ -711,35 +763,15 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let today = chrono::Utc::now().date_naive();
+        let positions = load_positions().unwrap_or_else(|_| seed_positions());
+        let selected = if positions.is_empty() {
+            0
+        } else {
+            positions.len() - 1
+        };
         Self {
-            positions: vec![
-                Position {
-                    ticker: "AAPL".into(),
-                    cost_per_share: 110.0,
-                    quantity: 40.0,
-                    sale_price: 127.5,
-                    purchase_date: today - chrono::Days::new(12),
-                    sale_date: today,
-                },
-                Position {
-                    ticker: "AMD".into(),
-                    cost_per_share: 64.0,
-                    quantity: 100.0,
-                    sale_price: 59.4,
-                    purchase_date: today - chrono::Days::new(4),
-                    sale_date: today,
-                },
-                Position {
-                    ticker: "MSFT".into(),
-                    cost_per_share: 320.5,
-                    quantity: 10.0,
-                    sale_price: 355.2,
-                    purchase_date: today - chrono::Days::new(25),
-                    sale_date: today - chrono::Days::new(5),
-                },
-            ],
-            selected: 0,
+            positions,
+            selected,
             mode: Mode::Portfolio,
             form: AddForm::new(),
             import_form: ImportForm::new(),
@@ -781,6 +813,7 @@ impl App {
         } else if self.selected >= self.positions.len() {
             self.selected = self.positions.len() - 1;
         }
+        save_positions(&self.positions);
     }
 
     fn import_csv(&mut self, path: &str) -> Result<usize, String> {
@@ -790,6 +823,7 @@ impl App {
         if !self.positions.is_empty() {
             self.selected = self.positions.len() - 1;
         }
+        save_positions(&self.positions);
         Ok(self.positions.len() - start)
     }
 }
