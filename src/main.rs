@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fs,
     io::{self, stdout},
     time::Duration,
 };
@@ -10,6 +11,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use csv::Trim;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -65,11 +67,26 @@ fn run_app(
                     KeyCode::Char('a') => {
                         app.mode = Mode::AddForm;
                         app.form = AddForm::new();
+                        app.editing = None;
+                    }
+                    KeyCode::Char('i') => {
+                        app.mode = Mode::Import;
+                        app.import_form = ImportForm::new();
                     }
                     KeyCode::Char('d') | KeyCode::Enter => {
                         if !app.positions.is_empty() {
                             app.mode = Mode::Detail;
                         }
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(pos) = app.selected_position().cloned() {
+                            app.mode = Mode::AddForm;
+                            app.editing = Some(app.selected);
+                            app.form = AddForm::from_position(&pos);
+                        }
+                    }
+                    KeyCode::Char('x') | KeyCode::Delete => {
+                        app.delete_selected();
                     }
                     KeyCode::Char('h') => app.mode = Mode::Help,
                     KeyCode::Down => app.select_next(),
@@ -81,9 +98,25 @@ fn run_app(
                     KeyCode::Char('q') => break,
                     KeyCode::Down => app.select_next(),
                     KeyCode::Up => app.select_prev(),
+                    KeyCode::Char('i') => {
+                        app.mode = Mode::Import;
+                        app.import_form = ImportForm::new();
+                    }
                     KeyCode::Char('a') => {
                         app.mode = Mode::AddForm;
                         app.form = AddForm::new();
+                        app.editing = None;
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(pos) = app.selected_position().cloned() {
+                            app.mode = Mode::AddForm;
+                            app.editing = Some(app.selected);
+                            app.form = AddForm::from_position(&pos);
+                        }
+                    }
+                    KeyCode::Char('x') | KeyCode::Delete => {
+                        app.delete_selected();
+                        app.mode = Mode::Portfolio;
                     }
                     _ => {}
                 },
@@ -94,17 +127,58 @@ fn run_app(
                     KeyCode::Char('q') => break,
                     _ => {}
                 },
+                Mode::Import => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = Mode::Portfolio;
+                        app.import_form = ImportForm::new();
+                    }
+                    KeyCode::Enter => {
+                        let path = app.import_form.path.trim().to_string();
+                        if path.is_empty() {
+                            app.import_form.error = Some("Path cannot be empty".into());
+                        } else {
+                            match app.import_csv(&path) {
+                                Ok(count) => {
+                                    app.import_form.message =
+                                        Some(format!("Imported {count} positions"));
+                                    app.import_form.error = None;
+                                    app.mode = Mode::Portfolio;
+                                }
+                                Err(err) => {
+                                    app.import_form.error = Some(err);
+                                    app.import_form.message = None;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => app.import_form.backspace(),
+                    KeyCode::Char(c) => {
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                            app.import_form.push_char(c);
+                        }
+                    }
+                    _ => {}
+                },
                 Mode::AddForm => match key.code {
                     KeyCode::Esc => {
                         app.mode = Mode::Portfolio;
+                        app.editing = None;
+                        app.form.error = None;
                     }
                     KeyCode::Enter => {
                         if app.form.on_enter() {
                             match app.form.try_build_position() {
                                 Ok(pos) => {
-                                    app.positions.push(pos);
-                                    app.selected = app.positions.len().saturating_sub(1);
+                                    if let Some(idx) = app.editing {
+                                        app.positions[idx] = pos;
+                                        app.selected = idx;
+                                    } else {
+                                        app.positions.push(pos);
+                                        app.selected = app.positions.len().saturating_sub(1);
+                                    }
                                     app.mode = Mode::Portfolio;
+                                    app.editing = None;
+                                    app.form.error = None;
                                 }
                                 Err(msg) => app.form.error = Some(msg),
                             }
@@ -135,6 +209,7 @@ fn run_app(
 
 #[derive(Clone, Debug)]
 struct Position {
+    ticker: String,
     cost_per_share: f64,
     quantity: f64,
     sale_price: f64,
@@ -212,6 +287,7 @@ impl AddForm {
     fn new() -> Self {
         Self {
             fields: vec![
+                Field::new("Ticker", "e.g. AAPL"),
                 Field::new("Cost/share", "e.g. 112.40"),
                 Field::new("Quantity", "e.g. 50"),
                 Field::new("Sale price", "e.g. 128.70"),
@@ -221,6 +297,17 @@ impl AddForm {
             active: 0,
             error: None,
         }
+    }
+
+    fn from_position(pos: &Position) -> Self {
+        let mut form = Self::new();
+        form.fields[0].value = pos.ticker.clone();
+        form.fields[1].value = format!("{:.2}", pos.cost_per_share);
+        form.fields[2].value = format!("{:.4}", pos.quantity);
+        form.fields[3].value = format!("{:.2}", pos.sale_price);
+        form.fields[4].value = pos.purchase_date.format(DATE_FMT).to_string();
+        form.fields[5].value = pos.sale_date.format(DATE_FMT).to_string();
+        form
     }
 
     fn on_enter(&self) -> bool {
@@ -252,17 +339,19 @@ impl AddForm {
     }
 
     fn try_build_position(&self) -> Result<Position, String> {
-        let cost = parse_f64(&self.fields[0].value, "cost/share")?;
-        let qty = parse_f64(&self.fields[1].value, "quantity")?;
-        let sale_price = parse_f64(&self.fields[2].value, "sale price")?;
-        let purchase_date = parse_date(&self.fields[3].value, "purchase date")?;
-        let sale_date = parse_date(&self.fields[4].value, "sale date")?;
+        let ticker = parse_ticker(&self.fields[0].value)?;
+        let cost = parse_f64(&self.fields[1].value, "cost/share")?;
+        let qty = parse_f64(&self.fields[2].value, "quantity")?;
+        let sale_price = parse_f64(&self.fields[3].value, "sale price")?;
+        let purchase_date = parse_date(&self.fields[4].value, "purchase date")?;
+        let sale_date = parse_date(&self.fields[5].value, "sale date")?;
 
         if sale_date < purchase_date {
             return Err("Sale date cannot be before purchase date".into());
         }
 
         Ok(Position {
+            ticker,
             cost_per_share: cost,
             quantity: qty,
             sale_price,
@@ -272,15 +361,277 @@ impl AddForm {
     }
 }
 
+#[derive(Clone)]
+struct ImportForm {
+    path: String,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+impl ImportForm {
+    fn new() -> Self {
+        Self {
+            path: String::new(),
+            message: None,
+            error: None,
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.path.pop();
+    }
+
+    fn push_char(&mut self, c: char) {
+        self.path.push(c);
+    }
+}
+
 fn parse_f64(raw: &str, label: &str) -> Result<f64, String> {
-    raw.trim()
-        .parse::<f64>()
-        .map_err(|_| format!("Invalid {label}"))
+    parse_number(raw).ok_or_else(|| format!("Invalid {label}"))
 }
 
 fn parse_date(raw: &str, label: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(raw.trim(), DATE_FMT)
-        .map_err(|_| format!("Invalid {label}, expected YYYY-MM-DD"))
+    parse_date_any(raw).map_err(|_| format!("Invalid {label}, expected YYYY-MM-DD or MM/DD/YYYY"))
+}
+
+fn parse_ticker(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Ticker cannot be empty".into());
+    }
+    Ok(trimmed.to_ascii_uppercase())
+}
+
+fn parse_date_any(raw: &str) -> Result<NaiveDate, ()> {
+    let trimmed = raw.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%m/%d/%Y"))
+        .map_err(|_| ())
+}
+
+fn parse_number(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "--" {
+        return None;
+    }
+    let mut cleaned = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch == ',' || ch == '$' || ch == ' ' {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    cleaned.parse::<f64>().ok()
+}
+
+fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
+    let data = fs::read_to_string(path).map_err(|e| format!("Failed to read {path}: {e}"))?;
+
+    #[derive(Clone, Copy)]
+    struct HeaderIdx {
+        ticker: usize,
+        cost: usize,
+        qty: usize,
+        sale_price: usize,
+        buy_date: usize,
+        sale_date: usize,
+    }
+
+    fn sanitize_header(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+
+    fn detect_header(parts: &[String]) -> Option<HeaderIdx> {
+        let mut t = None;
+        let mut cost = None;
+        let mut qty = None;
+        let mut sale = None;
+        let mut buy_d = None;
+        let mut sale_d = None;
+        for (i, raw) in parts.iter().enumerate() {
+            let h = sanitize_header(raw);
+            match h.as_str() {
+                "symbol" | "ticker" => t = Some(i),
+                "qty" | "qtynumber" | "qtyshare" | "quantity" | "qtyshares" => qty = Some(i),
+                "costshare" | "costpershare" => cost = Some(i),
+                "priceshare" | "pricepershare" | "saleprice" | "sellprice" => sale = Some(i),
+                "dateadded" | "purchasedate" | "buydate" => buy_d = Some(i),
+                "date" | "saledate" | "selldate" => sale_d = Some(i),
+                _ => {}
+            }
+        }
+        match (t, cost, qty, sale, buy_d, sale_d) {
+            (Some(t), Some(c), Some(q), Some(s), Some(bd), Some(sd)) => Some(HeaderIdx {
+                ticker: t,
+                cost: c,
+                qty: q,
+                sale_price: s,
+                buy_date: bd,
+                sale_date: sd,
+            }),
+            _ => None,
+        }
+    }
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .trim(Trim::All)
+        .flexible(true)
+        .from_reader(data.as_bytes());
+
+    let mut header_idx: Option<HeaderIdx> = None;
+    let mut positions = Vec::new();
+    let mut in_details_section = false;
+
+    for (idx, result) in rdr.records().enumerate() {
+        let line_no = idx + 1;
+        let record = result.map_err(|e| format!("Line {line_no}: {e}"))?;
+        if record.is_empty() {
+            continue;
+        }
+
+        let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        let joined_lower = fields.join(" ").to_ascii_lowercase();
+        if joined_lower.contains("taxable g&l details") {
+            in_details_section = true;
+            header_idx = None;
+            continue;
+        }
+
+        // Skip anything before we reach the TAXABLE G&L DETAILS table.
+        if !in_details_section && header_idx.is_none() {
+            continue;
+        }
+
+        if joined_lower.contains("total") || joined_lower.contains("subtotal") {
+            continue;
+        }
+
+        if header_idx.is_none() {
+            if let Some(h) = detect_header(&fields) {
+                header_idx = Some(h);
+                continue;
+            }
+            // Not a header row; ignore until we find one.
+            continue;
+        }
+
+        let get = |i: usize| fields.get(i).map(|s| s.as_str()).unwrap_or("");
+
+        let push_position = |ticker: String,
+                             cost: f64,
+                             qty: f64,
+                             sale_price: f64,
+                             purchase_date: NaiveDate,
+                             sale_date: NaiveDate,
+                             positions: &mut Vec<Position>| {
+            positions.push(Position {
+                ticker,
+                cost_per_share: cost,
+                quantity: qty,
+                sale_price,
+                purchase_date,
+                sale_date,
+            });
+        };
+
+        if let Some(h) = header_idx {
+            let required_missing = |i: usize| {
+                let v = get(i).trim();
+                v.is_empty() || v == "--"
+            };
+            if required_missing(h.cost)
+                || required_missing(h.qty)
+                || required_missing(h.sale_price)
+                || required_missing(h.buy_date)
+                || required_missing(h.sale_date)
+            {
+                continue;
+            }
+
+            let ticker = parse_ticker(get(h.ticker)).map_err(|e| format!("Line {line_no}: {e}"))?;
+            let cost =
+                parse_f64(get(h.cost), "cost/share").map_err(|e| format!("Line {line_no}: {e}"))?;
+            let qty =
+                parse_f64(get(h.qty), "quantity").map_err(|e| format!("Line {line_no}: {e}"))?;
+            let sale_price = parse_f64(get(h.sale_price), "sale price")
+                .map_err(|e| format!("Line {line_no}: {e}"))?;
+            let purchase_date = parse_date(get(h.buy_date), "purchase date")
+                .map_err(|e| format!("Line {line_no}: {e}"))?;
+            let sale_date = parse_date(get(h.sale_date), "sale date")
+                .map_err(|e| format!("Line {line_no}: {e}"))?;
+
+            if sale_date < purchase_date {
+                return Err(format!(
+                    "Line {line_no}: sale date cannot be before purchase date"
+                ));
+            }
+
+            push_position(
+                ticker,
+                cost,
+                qty,
+                sale_price,
+                purchase_date,
+                sale_date,
+                &mut positions,
+            );
+            continue;
+        }
+
+        // Fallback: expect at least 6 columns in ticker,cost,qty,sale,purchase_date,sale_date order
+        if fields.len() < 6 {
+            // pre/post table fluff; skip
+            continue;
+        }
+
+        let required_missing = |s: &str| {
+            let t = s.trim();
+            t.is_empty() || t == "--"
+        };
+        if required_missing(get(1))
+            || required_missing(get(2))
+            || required_missing(get(3))
+            || required_missing(get(4))
+            || required_missing(get(5))
+        {
+            continue;
+        }
+
+        let ticker = parse_ticker(get(0)).map_err(|e| format!("Line {line_no}: {e}"))?;
+        let cost = parse_f64(get(1), "cost/share").map_err(|e| format!("Line {line_no}: {e}"))?;
+        let qty = parse_f64(get(2), "quantity").map_err(|e| format!("Line {line_no}: {e}"))?;
+        let sale_price =
+            parse_f64(get(3), "sale price").map_err(|e| format!("Line {line_no}: {e}"))?;
+        let purchase_date =
+            parse_date(get(4), "purchase date").map_err(|e| format!("Line {line_no}: {e}"))?;
+        let sale_date =
+            parse_date(get(5), "sale date").map_err(|e| format!("Line {line_no}: {e}"))?;
+
+        if sale_date < purchase_date {
+            return Err(format!(
+                "Line {line_no}: sale date cannot be before purchase date"
+            ));
+        }
+
+        push_position(
+            ticker,
+            cost,
+            qty,
+            sale_price,
+            purchase_date,
+            sale_date,
+            &mut positions,
+        );
+    }
+
+    if positions.is_empty() {
+        return Err("No rows found to import".into());
+    }
+    Ok(positions)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -288,6 +639,7 @@ enum Mode {
     Portfolio,
     Detail,
     AddForm,
+    Import,
     Help,
 }
 
@@ -296,6 +648,8 @@ struct App {
     selected: usize,
     mode: Mode,
     form: AddForm,
+    import_form: ImportForm,
+    editing: Option<usize>,
 }
 
 impl App {
@@ -304,6 +658,7 @@ impl App {
         Self {
             positions: vec![
                 Position {
+                    ticker: "AAPL".into(),
                     cost_per_share: 110.0,
                     quantity: 40.0,
                     sale_price: 127.5,
@@ -311,6 +666,7 @@ impl App {
                     sale_date: today,
                 },
                 Position {
+                    ticker: "AMD".into(),
                     cost_per_share: 64.0,
                     quantity: 100.0,
                     sale_price: 59.4,
@@ -318,6 +674,7 @@ impl App {
                     sale_date: today,
                 },
                 Position {
+                    ticker: "MSFT".into(),
                     cost_per_share: 320.5,
                     quantity: 10.0,
                     sale_price: 355.2,
@@ -328,6 +685,8 @@ impl App {
             selected: 0,
             mode: Mode::Portfolio,
             form: AddForm::new(),
+            import_form: ImportForm::new(),
+            editing: None,
         }
     }
 
@@ -354,6 +713,28 @@ impl App {
     fn selected_position(&self) -> Option<&Position> {
         self.positions.get(self.selected)
     }
+
+    fn delete_selected(&mut self) {
+        if self.positions.is_empty() {
+            return;
+        }
+        self.positions.remove(self.selected);
+        if self.positions.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.positions.len() {
+            self.selected = self.positions.len() - 1;
+        }
+    }
+
+    fn import_csv(&mut self, path: &str) -> Result<usize, String> {
+        let start = self.positions.len();
+        let new_positions = parse_positions_csv(path)?;
+        self.positions.extend(new_positions);
+        if !self.positions.is_empty() {
+            self.selected = self.positions.len() - 1;
+        }
+        Ok(self.positions.len() - start)
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -373,6 +754,7 @@ fn ui(f: &mut Frame, app: &App) {
         Mode::Portfolio => draw_portfolio(f, vertical[1], app),
         Mode::Detail => draw_detail(f, vertical[1], app),
         Mode::AddForm => draw_form(f, size, app),
+        Mode::Import => draw_import_form(f, size, app),
         Mode::Help => draw_help(f, size),
     }
 
@@ -412,9 +794,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_footer(f: &mut Frame, area: Rect, mode: Mode) {
     let hint = match mode {
-        Mode::Portfolio => "↑/↓ select  • enter/d detail  • a add  • h help  • q quit",
-        Mode::Detail => "↑/↓ move  • b/esc back  • a add  • q quit",
+        Mode::Portfolio => {
+            "↑/↓ select  • enter/d detail  • a add  • e edit  • x delete  • i import  • h help  • q quit"
+        }
+        Mode::Detail => {
+            "↑/↓ move  • b/esc back  • e edit  • x delete  • a add  • i import  • q quit"
+        }
         Mode::AddForm => "tab/shift+tab move  • enter next/save  • esc cancel",
+        Mode::Import => "type path  • enter import  • esc cancel",
         Mode::Help => "enter/esc back  • q quit",
     };
     let footer = Paragraph::new(Line::from(hint))
@@ -445,7 +832,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec![
-        "Pos", "Cost", "Qty", "Sale", "ROI%", "Ann%", "Days", "Bought", "Sold",
+        "Pos", "Ticker", "Cost", "Qty", "Sale", "ROI%", "Ann%", "Days", "Bought", "Sold",
     ])
     .style(Style::default().fg(Color::Yellow));
 
@@ -458,6 +845,7 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
             let ann = Cell::from(styled_roi_pct(p.annualized_roi()));
             Row::new(vec![
                 Cell::from(format!("#{idx}")),
+                Cell::from(p.ticker.as_str()),
                 Cell::from(format_currency(p.cost_per_share)),
                 Cell::from(format!("{:.2}", p.quantity)),
                 Cell::from(format_currency(p.sale_price)),
@@ -472,6 +860,7 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
 
     let widths = [
         Constraint::Length(4),
+        Constraint::Length(10),
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(10),
@@ -562,6 +951,10 @@ fn draw_position_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let info = vec![
         Line::from(vec![
+            Span::styled("Ticker ", Style::default().fg(Color::Gray)),
+            Span::styled(pos.ticker.as_str(), Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
             Span::styled("ROI ", Style::default().fg(Color::Gray)),
             styled_roi_pct(pos.roi_pct()),
             Span::raw("  "),
@@ -634,8 +1027,13 @@ fn draw_position_detail(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_form(f: &mut Frame, area: Rect, app: &App) {
     let form_area = centered_rect(70, 70, area);
+    let title = if app.editing.is_some() {
+        "Edit position"
+    } else {
+        "Add position"
+    };
     let block = Block::default()
-        .title("Add position")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(block, form_area);
@@ -683,6 +1081,44 @@ fn draw_form(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(list, inner);
 }
 
+fn draw_import_form(f: &mut Frame, area: Rect, app: &App) {
+    let form_area = centered_rect(70, 40, area);
+    let block = Block::default()
+        .title("Import from CSV (ticker,cost,qty,sale,purchase_date,sale_date)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    f.render_widget(block, form_area);
+
+    let inner = form_area.inner(&ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Path: ", Style::default().fg(Color::Gray)),
+            Span::raw(app.import_form.path.as_str()),
+        ]),
+        Line::from("Press Enter to import, Esc to cancel"),
+    ];
+
+    if let Some(msg) = &app.import_form.message {
+        lines.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::Green),
+        )));
+    }
+    if let Some(err) = &app.import_form.error {
+        lines.push(Line::from(Span::styled(
+            err,
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(Block::default());
+    f.render_widget(para, inner);
+}
+
 fn draw_help(f: &mut Frame, area: Rect) {
     let text = vec![
         Line::from("ROI Tracker TUI"),
@@ -690,13 +1126,17 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("Portfolio view:"),
         Line::from("  - ↑/↓ move selection"),
         Line::from("  - enter/d open position detail"),
-        Line::from("  - a add a new position"),
+        Line::from("  - a add  • e edit  • x delete  • i import CSV"),
         Line::from("  - h open this help, q quit"),
         Line::from(" "),
         Line::from("Form view:"),
         Line::from("  - tab / shift+tab to move"),
         Line::from("  - enter to advance or save on last field"),
         Line::from("  - esc to cancel"),
+        Line::from(" "),
+        Line::from("Import view:"),
+        Line::from("  - type CSV path, enter to import, esc to cancel"),
+        Line::from("  - columns: ticker,cost,qty,sale,purchase_date,sale_date"),
     ];
 
     let block = Paragraph::new(text)
