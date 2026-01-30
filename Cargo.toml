@@ -1,6 +1,6 @@
 [package]
 name = "roi"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A fast, minimal Rust CLI tool for comparing the contents of two directories. Displays which files or directories exist only in one location or the other, with optional color output, depth limiting, and JSON support."
 license = "MIT"
@@ -9,7 +9,6 @@ categories = [
     "command-line-utilities",
     "visualization",
     "finance",
-    "tui"
 ]
 keywords = [
     "tui",
