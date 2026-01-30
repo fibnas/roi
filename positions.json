@@ -1,0 +1,26 @@
+[
+  {
+    "ticker": "AAPL",
+    "cost_per_share": 110.0,
+    "quantity": 40.0,
+    "sale_price": 127.5,
+    "purchase_date": "2026-01-18",
+    "sale_date": "2026-01-30"
+  },
+  {
+    "ticker": "AMD",
+    "cost_per_share": 64.0,
+    "quantity": 100.0,
+    "sale_price": 59.4,
+    "purchase_date": "2026-01-26",
+    "sale_date": "2026-01-30"
+  },
+  {
+    "ticker": "MSFT",
+    "cost_per_share": 320.5,
+    "quantity": 10.0,
+    "sale_price": 355.2,
+    "purchase_date": "2026-01-05",
+    "sale_date": "2026-01-25"
+  }
+]
