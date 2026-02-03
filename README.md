@@ -1,8 +1,8 @@
-# RustROI
+# ROI
 
 Terminal-first ROI tracker for active traders. Fast, local, keyboard-driven, and happy to live in a tmux pane.
 
-![RustROI](rustroi-800x450.png)
+![ROI](rustroi-800x450.png)
 
 [![Crates.io](https://img.shields.io/crates/v/rustroi.svg)](https://crates.io/crates/rustroi)
 [![Docs.rs](https://img.shields.io/docsrs/rustroi)](https://docs.rs/rustroi)
