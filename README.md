@@ -22,6 +22,12 @@ Terminal-first ROI tracker for active traders. Fast, local, keyboard-driven, and
 ## Quickstart
 
 ```bash
+cargo install roi
+```
+
+OR
+
+```bash
 git clone <this-repo>
 cd roi
 cargo run

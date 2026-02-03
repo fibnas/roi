@@ -64,145 +64,173 @@ fn run_app(
         }
 
         match event::read()? {
-            Event::Key(key) => match app.mode {
-                Mode::Portfolio => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('a') => {
-                        app.mode = Mode::AddForm;
-                        app.form = AddForm::new();
-                        app.editing = None;
-                    }
-                    KeyCode::Char('i') => {
-                        app.mode = Mode::Import;
-                        app.import_form = ImportForm::new();
-                    }
-                    KeyCode::Char('d') | KeyCode::Enter => {
-                        if !app.positions.is_empty() {
-                            app.mode = Mode::Detail;
+            Event::Key(key) => {
+                if app.filter_editing {
+                    match key.code {
+                        KeyCode::Esc => app.filter_editing = false,
+                        KeyCode::Enter => app.filter_editing = false,
+                        KeyCode::Backspace => {
+                            app.filter_text.pop();
+                            app.ensure_selection_visible();
                         }
-                    }
-                    KeyCode::Char('e') => {
-                        if let Some(pos) = app.selected_position().cloned() {
-                            app.mode = Mode::AddForm;
-                            app.editing = Some(app.selected);
-                            app.form = AddForm::from_position(&pos);
-                        }
-                    }
-                    KeyCode::Char('x') | KeyCode::Delete => {
-                        app.delete_selected();
-                    }
-                    KeyCode::Char('h') => app.mode = Mode::Help,
-                    KeyCode::Down => app.select_next(),
-                    KeyCode::Up => app.select_prev(),
-                    _ => {}
-                },
-                Mode::Detail => match key.code {
-                    KeyCode::Esc | KeyCode::Char('b') => app.mode = Mode::Portfolio,
-                    KeyCode::Char('q') => break,
-                    KeyCode::Down => app.select_next(),
-                    KeyCode::Up => app.select_prev(),
-                    KeyCode::Char('i') => {
-                        app.mode = Mode::Import;
-                        app.import_form = ImportForm::new();
-                    }
-                    KeyCode::Char('a') => {
-                        app.mode = Mode::AddForm;
-                        app.form = AddForm::new();
-                        app.editing = None;
-                    }
-                    KeyCode::Char('e') => {
-                        if let Some(pos) = app.selected_position().cloned() {
-                            app.mode = Mode::AddForm;
-                            app.editing = Some(app.selected);
-                            app.form = AddForm::from_position(&pos);
-                        }
-                    }
-                    KeyCode::Char('x') | KeyCode::Delete => {
-                        app.delete_selected();
-                        app.mode = Mode::Portfolio;
-                    }
-                    _ => {}
-                },
-                Mode::Help => match key.code {
-                    KeyCode::Esc | KeyCode::Char('b') | KeyCode::Enter => {
-                        app.mode = Mode::Portfolio
-                    }
-                    KeyCode::Char('q') => break,
-                    _ => {}
-                },
-                Mode::Import => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = Mode::Portfolio;
-                        app.import_form = ImportForm::new();
-                    }
-                    KeyCode::Enter => {
-                        let path = app.import_form.path.trim().to_string();
-                        if path.is_empty() {
-                            app.import_form.error = Some("Path cannot be empty".into());
-                        } else {
-                            match app.import_csv(&path) {
-                                Ok(count) => {
-                                    app.import_form.message =
-                                        Some(format!("Imported {count} positions"));
-                                    app.import_form.error = None;
-                                    app.mode = Mode::Portfolio;
-                                }
-                                Err(err) => {
-                                    app.import_form.error = Some(err);
-                                    app.import_form.message = None;
-                                }
+                        KeyCode::Char(c) => {
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                                app.filter_text.push(c);
+                                app.ensure_selection_visible();
                             }
                         }
+                        _ => {}
                     }
-                    KeyCode::Backspace => app.import_form.backspace(),
-                    KeyCode::Char(c) => {
-                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                            app.import_form.push_char(c);
+                    continue;
+                }
+
+                match app.mode {
+                    Mode::Portfolio => match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('a') => {
+                            app.mode = Mode::AddForm;
+                            app.form = AddForm::new();
+                            app.editing = None;
                         }
-                    }
-                    _ => {}
-                },
-                Mode::AddForm => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = Mode::Portfolio;
-                        app.editing = None;
-                        app.form.error = None;
-                    }
-                    KeyCode::Enter => {
-                        if app.form.on_enter() {
-                            match app.form.try_build_position() {
-                                Ok(pos) => {
-                                    if let Some(idx) = app.editing {
-                                        app.positions[idx] = pos;
-                                        app.selected = idx;
-                                    } else {
-                                        app.positions.push(pos);
-                                        app.selected = app.positions.len().saturating_sub(1);
+                        KeyCode::Char('i') => {
+                            app.mode = Mode::Import;
+                            app.import_form = ImportForm::new();
+                        }
+                        KeyCode::Char('d') | KeyCode::Enter => {
+                            if !app.filtered_positions().is_empty() {
+                                app.mode = Mode::Detail;
+                            }
+                        }
+                        KeyCode::Char('e') => {
+                            if let Some(pos) = app.selected_position().cloned() {
+                                app.mode = Mode::AddForm;
+                                app.editing = Some(app.selected);
+                                app.form = AddForm::from_position(&pos);
+                            }
+                        }
+                        KeyCode::Char('x') | KeyCode::Delete => {
+                            app.delete_selected();
+                        }
+                        KeyCode::Char('h') => app.mode = Mode::Help,
+                        KeyCode::Char('f') | KeyCode::Char('/') => {
+                            app.filter_editing = true;
+                        }
+                        KeyCode::Down => app.select_next(),
+                        KeyCode::Up => app.select_prev(),
+                        _ => {}
+                    },
+                    Mode::Detail => match key.code {
+                        KeyCode::Esc | KeyCode::Char('b') => app.mode = Mode::Portfolio,
+                        KeyCode::Char('q') => break,
+                        KeyCode::Down => app.select_next(),
+                        KeyCode::Up => app.select_prev(),
+                        KeyCode::Char('i') => {
+                            app.mode = Mode::Import;
+                            app.import_form = ImportForm::new();
+                        }
+                        KeyCode::Char('a') => {
+                            app.mode = Mode::AddForm;
+                            app.form = AddForm::new();
+                            app.editing = None;
+                        }
+                        KeyCode::Char('e') => {
+                            if let Some(pos) = app.selected_position().cloned() {
+                                app.mode = Mode::AddForm;
+                                app.editing = Some(app.selected);
+                                app.form = AddForm::from_position(&pos);
+                            }
+                        }
+                        KeyCode::Char('x') | KeyCode::Delete => {
+                            app.delete_selected();
+                            app.mode = Mode::Portfolio;
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('/') => {
+                            app.filter_editing = true;
+                        }
+                        _ => {}
+                    },
+                    Mode::Help => match key.code {
+                        KeyCode::Esc | KeyCode::Char('b') | KeyCode::Enter => {
+                            app.mode = Mode::Portfolio
+                        }
+                        KeyCode::Char('q') => break,
+                        _ => {}
+                    },
+                    Mode::Import => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = Mode::Portfolio;
+                            app.import_form = ImportForm::new();
+                        }
+                        KeyCode::Enter => {
+                            let path = app.import_form.path.trim().to_string();
+                            if path.is_empty() {
+                                app.import_form.error = Some("Path cannot be empty".into());
+                            } else {
+                                match app.import_csv(&path) {
+                                    Ok(count) => {
+                                        app.import_form.message =
+                                            Some(format!("Imported {count} positions"));
+                                        app.import_form.error = None;
+                                        app.mode = Mode::Portfolio;
                                     }
-                                    save_positions(&app.positions);
-                                    app.mode = Mode::Portfolio;
-                                    app.editing = None;
-                                    app.form.error = None;
+                                    Err(err) => {
+                                        app.import_form.error = Some(err);
+                                        app.import_form.message = None;
+                                    }
                                 }
-                                Err(msg) => app.form.error = Some(msg),
                             }
-                        } else {
-                            app.form.next_field();
                         }
-                    }
-                    KeyCode::Tab => app.form.next_field(),
-                    KeyCode::BackTab => app.form.prev_field(),
-                    KeyCode::Backspace => app.form.backspace(),
-                    KeyCode::Left => app.form.backspace(),
-                    KeyCode::Right => app.form.next_field(),
-                    KeyCode::Char(c) => {
-                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                            app.form.push_char(c);
+                        KeyCode::Backspace => app.import_form.backspace(),
+                        KeyCode::Char(c) => {
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                                app.import_form.push_char(c);
+                            }
                         }
-                    }
-                    _ => {}
-                },
-            },
+                        _ => {}
+                    },
+                    Mode::AddForm => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = Mode::Portfolio;
+                            app.editing = None;
+                            app.form.error = None;
+                        }
+                        KeyCode::Enter => {
+                            if app.form.on_enter() {
+                                match app.form.try_build_position() {
+                                    Ok(pos) => {
+                                        if let Some(idx) = app.editing {
+                                            app.positions[idx] = pos;
+                                            app.selected = idx;
+                                        } else {
+                                            app.positions.push(pos);
+                                            app.selected = app.positions.len().saturating_sub(1);
+                                        }
+                                        app.ensure_selection_visible();
+                                        save_positions(&app.positions);
+                                        app.mode = Mode::Portfolio;
+                                        app.editing = None;
+                                        app.form.error = None;
+                                    }
+                                    Err(msg) => app.form.error = Some(msg),
+                                }
+                            } else {
+                                app.form.next_field();
+                            }
+                        }
+                        KeyCode::Tab => app.form.next_field(),
+                        KeyCode::BackTab => app.form.prev_field(),
+                        KeyCode::Backspace => app.form.backspace(),
+                        KeyCode::Left => app.form.backspace(),
+                        KeyCode::Right => app.form.next_field(),
+                        KeyCode::Char(c) => {
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                                app.form.push_char(c);
+                            }
+                        }
+                        _ => {}
+                    },
+                }
+            }
             Event::Resize(_, _) => {} // redraw happens next loop
             _ => {}
         }
@@ -470,16 +498,16 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
             }
         }
 
-        if buy_d.is_none() {
-            if let Some(first_date) = date_cols.get(0) {
-                buy_d = Some(*first_date);
-            }
+        if buy_d.is_none()
+            && let Some(&first_date) = date_cols.first()
+        {
+            buy_d = Some(first_date);
         }
         if sale_d.is_none() {
             if let Some(second_date) = date_cols.get(1) {
                 sale_d = Some(*second_date);
-            } else if let Some(first_date) = date_cols.get(0) {
-                sale_d = Some(*first_date);
+            } else if let Some(&first_date) = date_cols.first() {
+                sale_d = Some(first_date);
             }
         }
 
@@ -534,7 +562,7 @@ fn parse_positions_csv(path: &str) -> Result<Vec<Position>, String> {
                 continue;
             }
         }
-        if let Some(first) = fields.get(0) {
+        if let Some(first) = fields.first() {
             let first_lower = first.trim().to_ascii_lowercase();
             if first_lower == "total" || first_lower == "subtotal" {
                 continue;
@@ -706,10 +734,10 @@ fn load_positions() -> Result<Vec<Position>, String> {
 
 fn save_positions(positions: &[Position]) {
     let path = Path::new(DATA_FILE);
-    if let Ok(json) = serde_json::to_string_pretty(positions) {
-        if let Err(err) = fs::write(path, json) {
-            eprintln!("Could not save positions: {err}");
-        }
+    if let Ok(json) = serde_json::to_string_pretty(positions)
+        && let Err(err) = fs::write(path, json)
+    {
+        eprintln!("Could not save positions: {err}");
     }
 }
 
@@ -759,6 +787,8 @@ struct App {
     form: AddForm,
     import_form: ImportForm,
     editing: Option<usize>,
+    filter_text: String,
+    filter_editing: bool,
 }
 
 impl App {
@@ -776,27 +806,41 @@ impl App {
             form: AddForm::new(),
             import_form: ImportForm::new(),
             editing: None,
+            filter_text: String::new(),
+            filter_editing: false,
         }
     }
 
     fn select_next(&mut self) {
-        if self.positions.is_empty() {
+        let filtered = self.filtered_indices();
+        if filtered.is_empty() {
             self.selected = 0;
             return;
         }
-        self.selected = (self.selected + 1) % self.positions.len();
+        let current = filtered
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+        let next = (current + 1) % filtered.len();
+        self.selected = filtered[next];
     }
 
     fn select_prev(&mut self) {
-        if self.positions.is_empty() {
+        let filtered = self.filtered_indices();
+        if filtered.is_empty() {
             self.selected = 0;
             return;
         }
-        if self.selected == 0 {
-            self.selected = self.positions.len() - 1;
+        let current = filtered
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+        let prev = if current == 0 {
+            filtered.len() - 1
         } else {
-            self.selected -= 1;
-        }
+            current - 1
+        };
+        self.selected = filtered[prev];
     }
 
     fn selected_position(&self) -> Option<&Position> {
@@ -813,6 +857,9 @@ impl App {
         } else if self.selected >= self.positions.len() {
             self.selected = self.positions.len() - 1;
         }
+        if !self.positions.is_empty() {
+            self.ensure_selection_visible();
+        }
         save_positions(&self.positions);
     }
 
@@ -823,8 +870,43 @@ impl App {
         if !self.positions.is_empty() {
             self.selected = self.positions.len() - 1;
         }
+        self.ensure_selection_visible();
         save_positions(&self.positions);
         Ok(self.positions.len() - start)
+    }
+
+    fn filter_matches(&self, pos: &Position) -> bool {
+        if self.filter_text.is_empty() {
+            return true;
+        }
+        let needle = self.filter_text.to_ascii_uppercase();
+        pos.ticker.to_ascii_uppercase().contains(&needle)
+    }
+
+    fn filtered_positions(&self) -> Vec<(usize, &Position)> {
+        self.positions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| self.filter_matches(p))
+            .collect()
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        self.filtered_positions()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let filtered = self.filtered_indices();
+        if filtered.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if !filtered.contains(&self.selected) {
+            self.selected = filtered[0];
+        }
     }
 }
 
@@ -886,10 +968,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 fn draw_footer(f: &mut Frame, area: Rect, mode: Mode) {
     let hint = match mode {
         Mode::Portfolio => {
-            "↑/↓ select  • enter/d detail  • a add  • e edit  • x delete  • i import  • h help  • q quit"
+            "↑/↓ select  • enter/d detail  • f filter  • a add  • e edit  • x delete  • i import  • h help  • q quit"
         }
         Mode::Detail => {
-            "↑/↓ move  • b/esc back  • e edit  • x delete  • a add  • i import  • q quit"
+            "↑/↓ move  • f filter  • b/esc back  • e edit  • x delete  • a add  • i import  • q quit"
         }
         Mode::AddForm => "tab/shift+tab move  • enter next/save  • esc cancel",
         Mode::Import => "type path  • enter import  • esc cancel",
@@ -922,19 +1004,20 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
+    let filtered = app.filtered_positions();
     let header = Row::new(vec![
         "Pos", "Ticker", "Cost", "Qty", "Sale", "PnL$", "ROI%", "Days", "Bought", "Sold",
     ])
     .style(Style::default().fg(Color::Yellow));
 
-    let rows: Vec<Row> = app
-        .positions
+    let mut rows: Vec<Row> = filtered
         .iter()
         .enumerate()
-        .map(|(idx, p)| {
+        .map(|(display_idx, (_, p))| {
+            let pnl_val = p.roi_value();
             let pnl = Cell::from(Span::styled(
-                format_currency(p.roi_value()),
-                Style::default().fg(if p.roi_value() >= 0.0 {
+                format_currency(pnl_val),
+                Style::default().fg(if pnl_val >= 0.0 {
                     Color::Green
                 } else {
                     Color::Red
@@ -942,7 +1025,7 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
             ));
             let roi = Cell::from(styled_roi_pct(p.roi_pct()));
             Row::new(vec![
-                Cell::from(format!("#{idx}")),
+                Cell::from(format!("#{}", display_idx + 1)),
                 Cell::from(p.ticker.as_str()),
                 Cell::from(format_currency(p.cost_per_share)),
                 Cell::from(format!("{:.2}", p.quantity)),
@@ -955,6 +1038,70 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
+
+    let summary =
+        summarize_positions(&filtered.iter().map(|(_, p)| *p).collect::<Vec<&Position>>());
+
+    let mut summary_rows = Vec::new();
+    let avg_pnl = Cell::from(Span::styled(
+        format_currency(summary.avg_pnl),
+        Style::default().fg(if summary.avg_pnl >= 0.0 {
+            Color::Green
+        } else {
+            Color::Red
+        }),
+    ));
+    summary_rows.push(
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "Avg",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            avg_pnl,
+            Cell::from(styled_roi_pct(summary.avg_roi_pct)),
+            Cell::from(format!("{:.1}", summary.avg_days)),
+            Cell::from(""),
+            Cell::from(""),
+        ])
+        .style(Style::default().bg(Color::DarkGray)),
+    );
+
+    let total_pnl = Cell::from(Span::styled(
+        format_currency(summary.total_pnl),
+        Style::default().fg(if summary.total_pnl >= 0.0 {
+            Color::Green
+        } else {
+            Color::Red
+        }),
+    ));
+    summary_rows.push(
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "Total",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            total_pnl,
+            Cell::from(styled_roi_pct(summary.weighted_roi_pct)),
+            Cell::from(summary.total_days.to_string()),
+            Cell::from(""),
+            Cell::from(""),
+        ])
+        .style(Style::default().bg(Color::DarkGray)),
+    );
+
+    rows.extend(summary_rows);
 
     let widths = [
         Constraint::Length(4),
@@ -969,9 +1116,18 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(12),
     ];
 
+    let mut title = "Positions".to_string();
+    if app.filter_editing {
+        title.push_str(" – filter: typing...");
+    } else if !app.filter_text.is_empty() {
+        title.push_str(&format!(" – filter: {}", app.filter_text));
+    } else {
+        title.push_str(" – press f to filter");
+    }
+
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Positions"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -980,16 +1136,17 @@ fn draw_positions_table(f: &mut Frame, area: Rect, app: &App) {
         );
 
     let mut state = TableState::default();
-    state.select(Some(app.selected));
+    let selected_row = filtered.iter().position(|(idx, _)| *idx == app.selected);
+    state.select(selected_row);
     f.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_portfolio_chart(f: &mut Frame, area: Rect, app: &App) {
-    let points: Vec<(f64, f64)> = app
-        .positions
+    let filtered = app.filtered_positions();
+    let points: Vec<(f64, f64)> = filtered
         .iter()
         .enumerate()
-        .map(|(i, p)| (i as f64, p.roi_pct() * 100.0))
+        .map(|(i, (_, p))| (i as f64, p.roi_pct() * 100.0))
         .collect();
 
     let y_bounds = bounds_from_points(&points, -5.0, 5.0);
@@ -1224,6 +1381,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("Portfolio view:"),
         Line::from("  - ↑/↓ move selection"),
         Line::from("  - enter/d open position detail"),
+        Line::from("  - f start ticker filter; type to refine, enter/esc to exit"),
         Line::from("  - a add  • e edit  • x delete  • i import CSV"),
         Line::from("  - h open this help, q quit"),
         Line::from(" "),
@@ -1252,6 +1410,49 @@ fn portfolio_stats(positions: &[Position]) -> (f64, f64, f64) {
         (total_proceeds - total_invested) / total_invested
     };
     (total_invested, total_proceeds, roi_pct)
+}
+
+#[derive(Default)]
+struct PositionSummary {
+    total_pnl: f64,
+    avg_pnl: f64,
+    avg_roi_pct: f64,
+    weighted_roi_pct: f64,
+    total_days: i64,
+    avg_days: f64,
+}
+
+fn summarize_positions(positions: &[&Position]) -> PositionSummary {
+    let count = positions.len();
+    if count == 0 {
+        return PositionSummary::default();
+    }
+
+    let total_pnl = positions.iter().map(|p| p.roi_value()).sum::<f64>();
+    let avg_pnl = total_pnl / count as f64;
+
+    let total_roi = positions.iter().map(|p| p.roi_pct()).sum::<f64>();
+    let avg_roi_pct = total_roi / count as f64;
+
+    let total_days = positions.iter().map(|p| p.days_held()).sum::<i64>();
+    let avg_days = total_days as f64 / count as f64;
+
+    let total_invested = positions.iter().map(|p| p.invested()).sum::<f64>();
+    let total_proceeds = positions.iter().map(|p| p.proceeds()).sum::<f64>();
+    let weighted_roi_pct = if total_invested.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (total_proceeds - total_invested) / total_invested
+    };
+
+    PositionSummary {
+        total_pnl,
+        avg_pnl,
+        avg_roi_pct,
+        weighted_roi_pct,
+        total_days,
+        avg_days,
+    }
 }
 
 fn format_currency(value: f64) -> String {
